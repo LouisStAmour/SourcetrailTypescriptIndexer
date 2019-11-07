@@ -1,0 +1,35 @@
+{
+  "author": {
+    "name": "Louis St-Amour",
+    "url": "https://github.com/LouisStAmour"
+  },
+  "bugs": {
+    "url": "https://github.com/LouisStAmour/SourcetrailTypescriptIndexer/issues"
+  },
+  "description": "Typescript Indexer for Sourcetrail using the TypeScript compiler and node bindings contributed to SourcetrailDB",
+  "dependencies": {
+    "@microsoft/ts-command-line": "^4.3.4",
+    "sourcetraildb": "file:../sourcetraildb",
+    "typescript": "3.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "12.12.6",
+    "@typescript-eslint/eslint-plugin": "2.6.1",
+    "@typescript-eslint/parser": "2.6.1",
+    "eslint": "6.6.0",
+    "ts-node": "8.4.1"
+  },
+  "homepage": "https://github.com/LouisStAmour/SourcetrailTypescriptIndexer#readme",
+  "license": "Apache-2.0",
+  "main": "src/index.ts",
+  "name": "sourcetrail-typescript-indexer",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LouisStAmour/SourcetrailTypescriptIndexer.git"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "version": "0.0.0"
+}
