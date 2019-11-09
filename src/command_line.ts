@@ -2,7 +2,7 @@ import {
   CommandLineParser,
   CommandLineFlagParameter
 } from "@microsoft/ts-command-line";
-import { IndexAction } from "./IndexAction";
+import { IndexFileAction } from "./actions";
 
 export class IndexerCommandLine extends CommandLineParser {
   private _verbose: CommandLineFlagParameter;
@@ -14,7 +14,7 @@ export class IndexerCommandLine extends CommandLineParser {
         "Typescript Indexer for Sourcetrail using the TypeScript compiler and node bindings contributed to SourcetrailDB."
     });
 
-    this.addAction(new IndexAction());
+    this.addAction(new IndexFileAction());
   }
 
   protected onDefineParameters(): void {
