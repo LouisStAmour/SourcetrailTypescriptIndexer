@@ -1,6 +1,7 @@
 import * as ts from "typescript";
 import * as sdb from "sourcetraildb";
 import * as path from "path";
+import { normalizePath, combinePaths } from "./util/path";
 
 // The following is only partially written and heavily inspired by https://github.com/Microsoft/TypeScript/wiki/Using-the-Compiler-API#a-minimal-compiler
 // and https://github.com/microsoft/TypeScript/blob/38652d4cd7edcdc84580a09dd5e9b304f62a2f2b/scripts/buildProtocol.ts
@@ -14,22 +15,66 @@ function isStringEnum(declaration: ts.EnumDeclaration) {
   );
 }
 
+const diagHost: ts.FormatDiagnosticsHost = {
+  getCanonicalFileName(f) {
+    return f;
+  },
+  getCurrentDirectory() {
+    return ".";
+  },
+  getNewLine() {
+    return "\r\n";
+  }
+};
+
+/**
+ * Report error and exit
+ */
+function reportUnrecoverableDiagnostic(diagnostic: ts.Diagnostic) {
+  console.error(ts.formatDiagnostic(diagnostic, diagHost));
+  ts.sys.exit(ts.ExitStatus.DiagnosticsPresent_OutputsSkipped);
+}
+
+/** Parses config file using System interface */
+function parseConfigFile(
+  configFileName: string,
+  optionsToExtend: ts.CompilerOptions = {},
+  system: ts.System = ts.sys
+) {
+  const host: ts.ParseConfigFileHost = <any>system;
+  host.onUnRecoverableConfigFileDiagnostic = reportUnrecoverableDiagnostic;
+  const result = ts.getParsedCommandLineOfConfigFile(
+    configFileName,
+    optionsToExtend,
+    host
+  );
+  host.onUnRecoverableConfigFileDiagnostic = undefined!; // TODO: GH#18217
+  return result;
+}
+
 export class Indexing {
   private sdbWriter: sdb.SourcetrailDBWriter;
   private fileIds = new Map<string, sdb.FileId>();
   private program: ts.Program;
   private diagnostics: readonly ts.Diagnostic[];
-  private verbose: boolean;
 
   private constructor(
     private databaseFilePath: string,
-    fileNames: string[],
-    options: ts.CompilerOptions,
-    verbose: boolean
+    private verbose: boolean,
+    config: ts.ParsedCommandLine
   ) {
-    this.sdbWriter = new sdb.SourcetrailDBWriter();
-    this.program = ts.createProgram(fileNames, options);
+    const { fileNames, options, projectReferences } = config;
+    const host = ts.createCompilerHost(options);
+    const programOptions: ts.CreateProgramOptions = {
+      rootNames: fileNames,
+      options,
+      projectReferences,
+      host,
+      configFileParsingDiagnostics: ts.getConfigFileParsingDiagnostics(config)
+    };
+    this.program = ts.createProgram(programOptions);
     this.diagnostics = ts.getPreEmitDiagnostics(this.program);
+    this.sdbWriter = new sdb.SourcetrailDBWriter();
   }
 
   private getFileId(file: ts.SourceFile): sdb.FileId {
@@ -207,21 +252,71 @@ export class Indexing {
     databaseFilePath: string,
     filename: string,
     verbose: boolean
-  ): void {}
+  ): void {
+    Indexing.PerformIndexing(databaseFilePath, verbose, {
+      fileNames: [filename],
+      options: {},
+      errors: []
+    });
+  }
 
   static IndexProject(
     databaseFilePath: string,
-    projectPath: string,
-    verbose: boolean
-  ): void {}
-
-  static IndexFiles(
-    databaseFilePath: string,
-    fileNames: string[],
-    options: ts.CompilerOptions,
+    projectPath: string | undefined,
     verbose: boolean
   ): void {
-    const indexer = new Indexing(databaseFilePath, fileNames, options, verbose);
+    let configFileName: string | undefined;
+    if (projectPath === undefined) {
+      const currentDirectory = ts.sys.getCurrentDirectory();
+      const searchPath = normalizePath(currentDirectory);
+      configFileName = ts.findConfigFile(searchPath, ts.sys.fileExists);
+      if (configFileName === undefined) {
+        console.error(
+          "Cannot find a tsconfig.json file at the specified directory: ",
+          currentDirectory
+        );
+        return ts.sys.exit(ts.ExitStatus.DiagnosticsPresent_OutputsSkipped);
+      }
+    } else {
+      const fileOrDirectory = normalizePath(projectPath);
+      if (
+        !fileOrDirectory /* "." */ ||
+        ts.sys.directoryExists(fileOrDirectory)
+      ) {
+        configFileName = combinePaths(fileOrDirectory, "tsconfig.json");
+        if (!ts.sys.fileExists(configFileName)) {
+          console.error(
+            "Cannot find a tsconfig.json file at the specified directory: ",
+            projectPath
+          );
+          return ts.sys.exit(ts.ExitStatus.DiagnosticsPresent_OutputsSkipped);
+        }
+      } else {
+        configFileName = fileOrDirectory;
+        if (!ts.sys.fileExists(configFileName)) {
+          if (!ts.sys.fileExists(configFileName)) {
+            console.error("The specified path does not exist: ", projectPath);
+            return ts.sys.exit(ts.ExitStatus.DiagnosticsPresent_OutputsSkipped);
+          }
+        }
+      }
+    }
+    const config = parseConfigFile(configFileName);
+    if (config.errors.length > 0) {
+      config.errors.forEach(diagnostic =>
+        console.error(ts.formatDiagnostic(diagnostic, diagHost))
+      );
+      ts.sys.exit(ts.ExitStatus.DiagnosticsPresent_OutputsSkipped);
+    }
+    Indexing.PerformIndexing(databaseFilePath, verbose, config);
+  }
+
+  static PerformIndexing(
+    databaseFilePath: string,
+    verbose: boolean,
+    config: ts.ParsedCommandLine
+  ): void {
+    const indexer = new Indexing(databaseFilePath, verbose, config);
     indexer.open(() => {
       indexer.addSourceFiles();
       indexer.addDiagnostics();
