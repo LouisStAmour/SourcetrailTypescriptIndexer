@@ -9,15 +9,15 @@
   "description": "Typescript Indexer for Sourcetrail using the TypeScript compiler and node bindings contributed to SourcetrailDB",
   "dependencies": {
     "@microsoft/ts-command-line": "^4.3.4",
-    "sourcetraildb": "file:../sourcetraildb",
-    "typescript": "3.7.2"
+    "sourcetraildb": "file:../sourcetraildb"
   },
   "devDependencies": {
     "@types/node": "12.12.6",
     "@typescript-eslint/eslint-plugin": "2.6.1",
     "@typescript-eslint/parser": "2.6.1",
     "eslint": "6.6.0",
-    "ts-node": "8.4.1"
+    "ts-node": "^8.4.1",
+    "typescript": "^3.7.2"
   },
   "homepage": "https://github.com/LouisStAmour/SourcetrailTypescriptIndexer#readme",
   "license": "Apache-2.0",
@@ -29,6 +29,7 @@
     "url": "git+https://github.com/LouisStAmour/SourcetrailTypescriptIndexer.git"
   },
   "scripts": {
+    "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "version": "0.0.0"

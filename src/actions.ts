@@ -9,7 +9,6 @@ export class IndexFileAction extends CommandLineAction {
   private _databaseFilePath: CommandLineStringParameter;
   private _sourceFilePath: CommandLineStringParameter;
   private _clear: CommandLineFlagParameter;
-  private _verbose: CommandLineFlagParameter;
 
   public constructor() {
     super({
@@ -22,9 +21,9 @@ export class IndexFileAction extends CommandLineAction {
 
   protected async onExecute(): Promise<void> {
     Indexing.IndexFile(
-      this._databaseFilePath.value,
-      this._sourceFilePath.value,
-      this._verbose.value
+      this._databaseFilePath?.value,
+      this._sourceFilePath?.value,
+      this._clear?.value ?? false,
     );
   }
 
@@ -55,7 +54,6 @@ export class IndexProjectAction extends CommandLineAction {
   private _databaseFilePath: CommandLineStringParameter;
   private _sourceProjectPath: CommandLineStringParameter;
   private _clear: CommandLineFlagParameter;
-  private _verbose: CommandLineFlagParameter;
 
   public constructor() {
     super({
@@ -68,9 +66,9 @@ export class IndexProjectAction extends CommandLineAction {
 
   protected async onExecute(): Promise<void> {
     Indexing.IndexProject(
-      this._databaseFilePath.value,
-      this._sourceProjectPath.value,
-      this._verbose.value
+      this._databaseFilePath?.value,
+      this._sourceProjectPath?.value,
+      this._clear?.value ?? false,
     );
   }
 

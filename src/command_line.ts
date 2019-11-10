@@ -2,7 +2,8 @@ import {
   CommandLineParser,
   CommandLineFlagParameter
 } from "@microsoft/ts-command-line";
-import { IndexFileAction } from "./actions";
+import { IndexFileAction, IndexProjectAction } from "./actions";
+import { Indexing } from "./indexing_logic";
 
 export class IndexerCommandLine extends CommandLineParser {
   private _verbose: CommandLineFlagParameter;
@@ -15,6 +16,7 @@ export class IndexerCommandLine extends CommandLineParser {
     });
 
     this.addAction(new IndexFileAction());
+    this.addAction(new IndexProjectAction());
   }
 
   protected onDefineParameters(): void {
@@ -26,8 +28,7 @@ export class IndexerCommandLine extends CommandLineParser {
   }
 
   protected onExecute(): Promise<void> {
-    // override
-    //BusinessLogic.configureLogger(this._verbose.value);
+    Indexing.verbose = this._verbose?.value ?? false;
     return super.onExecute();
   }
 }

@@ -1,5 +1,18 @@
 import * as ts from "typescript";
-import * as sdb from "sourcetraildb";
+import {
+  WriterType,
+  Writer,
+  SourceRange,
+  NameHierarchy,
+  NameElement,
+  DefinitionKind,
+  ReferenceKind,
+  SymbolKind,
+  FileId,
+  LocalSymbolId,
+  ReferenceId,
+  SymbolId
+} from "sourcetraildb";
 import * as path from "path";
 import { normalizePath, combinePaths } from "./util/path";
 
@@ -53,14 +66,14 @@ function parseConfigFile(
 }
 
 export class Indexing {
-  private sdbWriter: sdb.SourcetrailDBWriter;
-  private fileIds = new Map<string, sdb.FileId>();
+  private sdbWriter: WriterType;
+  private fileIds = new Map<string, FileId>();
   private program: ts.Program;
   private diagnostics: readonly ts.Diagnostic[];
+  public static verbose: boolean;
 
   private constructor(
     private databaseFilePath: string,
-    private verbose: boolean,
     config: ts.ParsedCommandLine
   ) {
     const { fileNames, options, projectReferences } = config;
@@ -74,10 +87,10 @@ export class Indexing {
     };
     this.program = ts.createProgram(programOptions);
     this.diagnostics = ts.getPreEmitDiagnostics(this.program);
-    this.sdbWriter = new sdb.SourcetrailDBWriter();
+    this.sdbWriter = new Writer();
   }
 
-  private getFileId(file: ts.SourceFile): sdb.FileId {
+  private getFileId(file: ts.SourceFile): FileId {
     let fileId = this.fileIds.get(file.fileName);
     if (fileId !== undefined) {
       return fileId;
@@ -117,7 +130,7 @@ export class Indexing {
       const end = diagnostic.file.getLineAndCharacterOfPosition(
         diagnostic.start! + diagnostic.length!
       );
-      const sourceRange = new sdb.SourceRange(
+      const sourceRange = new SourceRange(
         this.getFileId(diagnostic.file),
         start.line + 1,
         start.character + 1,
@@ -134,24 +147,24 @@ export class Indexing {
   // TODO: Rename and rewrite these to traverse and map to Sourcetrail symbols, etc.
   // Use https://github.com/CoatiSoftware/SourcetrailPythonIndexer/blob/master/indexer.py as an example
   private visitTypeNodes(node: ts.Node) {
-    if (node.parent) {
+    /* if (node.parent) {
       switch (node.parent.kind) {
-        case ts.SyntaxKind.VariableDeclaration:
+        case ts.SyntaxKind.IndexSignature:
         case ts.SyntaxKind.MethodDeclaration:
         case ts.SyntaxKind.MethodSignature:
+        case ts.SyntaxKind.Parameter:
         case ts.SyntaxKind.PropertyDeclaration:
         case ts.SyntaxKind.PropertySignature:
-        case ts.SyntaxKind.Parameter:
-        case ts.SyntaxKind.IndexSignature:
+        case ts.SyntaxKind.VariableDeclaration:
           if (
             (<
-              | ts.VariableDeclaration
-              | ts.MethodDeclaration
-              | ts.PropertyDeclaration
-              | ts.ParameterDeclaration
-              | ts.PropertySignature
-              | ts.MethodSignature
               | ts.IndexSignatureDeclaration
+              | ts.MethodDeclaration
+              | ts.MethodSignature
+              | ts.ParameterDeclaration
+              | ts.PropertyDeclaration
+              | ts.PropertySignature
+              | ts.VariableDeclaration
             >node.parent).type === node
           ) {
             this.processTypeOfNode(node);
@@ -174,10 +187,14 @@ export class Indexing {
           }
           break;
       }
+    }*/
+    if (node.kind === ts.SyntaxKind.Identifier) {
+      debugger;
     }
+
     ts.forEachChild(node, n => this.visitTypeNodes(n));
   }
-
+  /*
   private processTypeOfNode(node: ts.Node): void {
     if (node.kind === ts.SyntaxKind.UnionType) {
       for (const t of (<ts.UnionTypeNode>node).types) {
@@ -231,7 +248,7 @@ export class Indexing {
         }
       }
     }
-  }
+  }*/
 
   private open(block: () => void) {
     const result = this.sdbWriter.open(this.databaseFilePath);
@@ -251,19 +268,23 @@ export class Indexing {
   static IndexFile(
     databaseFilePath: string,
     filename: string,
-    verbose: boolean
+    clear: boolean
   ): void {
-    Indexing.PerformIndexing(databaseFilePath, verbose, {
-      fileNames: [filename],
-      options: {},
-      errors: []
-    });
+    Indexing.PerformIndexing(
+      databaseFilePath,
+      {
+        fileNames: [filename],
+        options: {},
+        errors: []
+      },
+      clear
+    );
   }
 
   static IndexProject(
     databaseFilePath: string,
     projectPath: string | undefined,
-    verbose: boolean
+    clear: boolean
   ): void {
     let configFileName: string | undefined;
     if (projectPath === undefined) {
@@ -308,21 +329,22 @@ export class Indexing {
       );
       ts.sys.exit(ts.ExitStatus.DiagnosticsPresent_OutputsSkipped);
     }
-    Indexing.PerformIndexing(databaseFilePath, verbose, config);
+    Indexing.PerformIndexing(databaseFilePath, config, clear);
   }
 
   static PerformIndexing(
     databaseFilePath: string,
-    verbose: boolean,
-    config: ts.ParsedCommandLine
+    config: ts.ParsedCommandLine,
+    clear: boolean
   ): void {
-    const indexer = new Indexing(databaseFilePath, verbose, config);
+    const indexer = new Indexing(databaseFilePath, config);
     indexer.open(() => {
+      if (clear) indexer.sdbWriter.clear();
       indexer.addSourceFiles();
       indexer.addDiagnostics();
       indexer.program
         .getSourceFiles()
-        .forEach(sf => indexer.processTypeOfNode(sf));
+        .forEach(sf => indexer.visitTypeNodes(sf));
     });
   }
 }
