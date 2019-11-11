@@ -188,7 +188,7 @@ export class Indexing {
           break;
       }
     }*/
-    if (node.kind === ts.SyntaxKind.Identifier) {
+    if (node.kind === ts.SyntaxKind.Identifier && node.getText() === "Utils") {
       debugger;
     }
 
@@ -342,9 +342,10 @@ export class Indexing {
       if (clear) indexer.sdbWriter.clear();
       indexer.addSourceFiles();
       indexer.addDiagnostics();
-      indexer.program
-        .getSourceFiles()
-        .forEach(sf => indexer.visitTypeNodes(sf));
+      if (false)
+        indexer.program
+          .getSourceFiles()
+          .forEach(sf => indexer.visitTypeNodes(sf));
     });
   }
 }
