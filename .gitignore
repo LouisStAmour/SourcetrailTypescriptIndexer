@@ -63,3 +63,4 @@ typings/
 *.srctrldb
 *.srctrlprj
 dist
+*.srctrlbm

@@ -14,6 +14,7 @@ import {
   SymbolId
 } from "sourcetraildb";
 import * as path from "path";
+import * as tspath from "./util/path";
 import { normalizePath, combinePaths } from "./util/path";
 
 // The following is only partially written and heavily inspired by https://github.com/Microsoft/TypeScript/wiki/Using-the-Compiler-API#a-minimal-compiler
@@ -69,6 +70,7 @@ export class Indexing {
   private sdbWriter: WriterType;
   private fileIds = new Map<string, FileId>();
   private program: ts.Program;
+  private host: ts.CompilerHost;
   private diagnostics: readonly ts.Diagnostic[];
   public static verbose: boolean;
 
@@ -77,12 +79,12 @@ export class Indexing {
     config: ts.ParsedCommandLine
   ) {
     const { fileNames, options, projectReferences } = config;
-    const host = ts.createCompilerHost(options);
+    this.host = ts.createCompilerHost(options);
     const programOptions: ts.CreateProgramOptions = {
       rootNames: fileNames,
       options,
       projectReferences,
-      host,
+      host: this.host,
       configFileParsingDiagnostics: ts.getConfigFileParsingDiagnostics(config)
     };
     this.program = ts.createProgram(programOptions);
@@ -106,12 +108,6 @@ export class Indexing {
     }
     this.fileIds.set(file.fileName, fileId);
     return fileId;
-  }
-
-  private addSourceFiles() {
-    this.program
-      .getSourceFiles()
-      .forEach(sourceFile => this.getFileId(sourceFile));
   }
 
   private addDiagnostics() {
@@ -265,6 +261,180 @@ export class Indexing {
     }
   }
 
+  private recordPackage(name: NameHierarchy) {
+    const symbolId = this.sdbWriter.recordSymbol(name);
+    if (symbolId === 0) {
+      new Error(this.sdbWriter.getLastError());
+    }
+    if (
+      !this.sdbWriter.recordSymbolDefinitionKind(
+        symbolId,
+        DefinitionKind.EXPLICIT
+      )
+    ) {
+      new Error(this.sdbWriter.getLastError());
+    }
+    if (!this.sdbWriter.recordSymbolKind(symbolId, SymbolKind.PACKAGE)) {
+      new Error(this.sdbWriter.getLastError());
+    }
+    return symbolId;
+  }
+
+  private recordModule(
+    name: NameHierarchy,
+    sf: ts.SourceFile,
+    sfFileId: FileId
+  ) {
+    const symbolId = this.sdbWriter.recordSymbol(name);
+    if (symbolId === 0) {
+      new Error(this.sdbWriter.getLastError());
+    }
+    if (
+      !this.sdbWriter.recordSymbolDefinitionKind(
+        symbolId,
+        DefinitionKind.EXPLICIT
+      )
+    ) {
+      new Error(this.sdbWriter.getLastError());
+    }
+    if (!this.sdbWriter.recordSymbolKind(symbolId, SymbolKind.MODULE)) {
+      new Error(this.sdbWriter.getLastError());
+    }
+    if (
+      !this.sdbWriter.recordSymbolScopeLocation(
+        symbolId,
+        this.nodeToSourceRange(sf, sfFileId)
+      )
+    ) {
+      new Error(this.sdbWriter.getLastError());
+    }
+    return symbolId;
+  }
+
+  private nodeToSourceRange(node: ts.Node, fileId: FileId) {
+    const start = node
+      .getSourceFile()
+      .getLineAndCharacterOfPosition(node.getStart());
+    const end = node
+      .getSourceFile()
+      .getLineAndCharacterOfPosition(node.getEnd());
+    return this.toSourceRange(fileId, start, end);
+  }
+
+  private toSourceRange(
+    fileId: number,
+    start: ts.LineAndCharacter,
+    end: ts.LineAndCharacter
+  ) {
+    return new SourceRange(
+      fileId,
+      start.line + 1,
+      start.character,
+      end.line + 1,
+      end.character + 1
+    );
+  }
+
+  private libReferenceToSourceRange(
+    ref: ts.FileReference,
+    sf: ts.SourceFile,
+    fileId: FileId
+  ) {
+    const start = sf.getLineAndCharacterOfPosition(ref.pos);
+    const end = sf.getLineAndCharacterOfPosition(ref.end);
+    return this.toSourceRange(fileId, start, end);
+  }
+
+  private addCurrentFile(sf: ts.SourceFile) {
+    const fileId = this.getFileId(sf);
+    //const sfSymbolId = this.sourceFileToModuleSymbolId(sf, fileId);
+    sf.libReferenceDirectives.forEach(ref => {
+      const refSourceFile = (this.program as any).getLibFileFromReference(ref);
+      const refFileId = this.getFileId(refSourceFile);
+      const refFileSymbolId = this.sourceFileToModuleSymbolId(
+        refSourceFile,
+        fileId
+      );
+      const refSymbolId = this.sdbWriter.recordSymbol(
+        new NameHierarchy("", [
+          new NameElement(`<reference lib="${ref.fileName}" />`)
+        ])
+      );
+      if (refSymbolId === 0) {
+        new Error(this.sdbWriter.getLastError());
+      }
+      let success = this.sdbWriter.recordSymbolDefinitionKind(
+        refSymbolId,
+        DefinitionKind.EXPLICIT
+      );
+      if (!success) {
+        new Error(this.sdbWriter.getLastError());
+      }
+      success = this.sdbWriter.recordSymbolKind(refSymbolId, SymbolKind.MACRO);
+      if (!success) {
+        new Error(this.sdbWriter.getLastError());
+      }
+      success = this.sdbWriter.recordSymbolLocation(
+        refSymbolId,
+        this.libReferenceToSourceRange(ref, sf, fileId)
+      );
+      if (!success) {
+        new Error(this.sdbWriter.getLastError());
+      }
+      const referenceId = this.sdbWriter.recordReference(
+        refSymbolId,
+        refFileSymbolId,
+        ReferenceKind.INCLUDE
+      );
+      if (referenceId === 0) {
+        new Error(this.sdbWriter.getLastError());
+      }
+      success = this.sdbWriter.recordReferenceLocation(
+        referenceId,
+        this.libReferenceToSourceRange(ref, sf, fileId)
+      );
+      if (!success) {
+        new Error(this.sdbWriter.getLastError());
+      }
+    });
+  }
+
+  private sourceFileToModuleSymbolId(sf: ts.SourceFile, sfFileId: FileId) {
+    const filenameParts = path
+      .relative(this.program.getCurrentDirectory(), sf.fileName)
+      .split(path.sep);
+    const name = new NameHierarchy(
+      "/",
+      filenameParts.map(p => new NameElement(p))
+    );
+    const symbolId = this.recordModule(name, sf, sfFileId);
+    if (symbolId === 0) {
+      new Error(this.sdbWriter.getLastError());
+    }
+    for (let i = 0; i < filenameParts.length; i++) {
+      if (filenameParts[i] === "node_modules") {
+        const packageSymbolId = this.recordPackage(
+          new NameHierarchy(
+            "/",
+            filenameParts.slice(i, i + 2).map(p => new NameElement(p))
+          )
+        );
+        if (packageSymbolId === 0) {
+          new Error(this.sdbWriter.getLastError());
+        }
+        const refId = this.sdbWriter.recordReference(
+          packageSymbolId,
+          symbolId,
+          ReferenceKind.INCLUDE
+        );
+        if (refId === 0) {
+          new Error(this.sdbWriter.getLastError());
+        }
+      }
+    }
+    return symbolId;
+  }
+
   static IndexFile(
     databaseFilePath: string,
     filename: string,
@@ -339,13 +509,34 @@ export class Indexing {
   ): void {
     const indexer = new Indexing(databaseFilePath, config);
     indexer.open(() => {
-      if (clear) indexer.sdbWriter.clear();
-      indexer.addSourceFiles();
+      if (!indexer.sdbWriter.beginTransaction()) {
+        new Error(indexer.sdbWriter.getLastError());
+      }
+      if (clear) {
+        if (!indexer.sdbWriter.clear()) {
+          new Error(indexer.sdbWriter.getLastError());
+        }
+      }
+      if (!indexer.sdbWriter.commitTransaction()) {
+        new Error(indexer.sdbWriter.getLastError());
+      }
+      if (!indexer.sdbWriter.optimizeDatabaseMemory()) {
+        new Error(indexer.sdbWriter.getLastError());
+      }
+      if (!indexer.sdbWriter.beginTransaction()) {
+        new Error(indexer.sdbWriter.getLastError());
+      }
       indexer.addDiagnostics();
-      if (false)
-        indexer.program
-          .getSourceFiles()
-          .forEach(sf => indexer.visitTypeNodes(sf));
+      indexer.program.getSourceFiles().forEach(sf => {
+        indexer.addCurrentFile(sf);
+        //indexer.visitTypeNodes(sf);
+      });
+      if (!indexer.sdbWriter.commitTransaction()) {
+        new Error(indexer.sdbWriter.getLastError());
+      }
+      if (!indexer.sdbWriter.optimizeDatabaseMemory()) {
+        new Error(indexer.sdbWriter.getLastError());
+      }
     });
   }
 }
