@@ -1,18 +1,10 @@
 import * as ts from "typescript";
-import {
-  WriterType,
-  Writer,
-  SourceRange,
-  NameHierarchy,
-  NameElement,
-  DefinitionKind,
+import SourcetrailDB, {
+  FileBuilder,
   ReferenceKind,
-  SymbolKind,
-  FileId,
-  LocalSymbolId,
-  ReferenceId,
-  SymbolId
-} from "sourcetraildb";
+  SymbolKind
+} from "sourcetraildb/dist/builder";
+
 import * as path from "path";
 import * as tspath from "./util/path";
 import { normalizePath, combinePaths } from "./util/path";
@@ -67,17 +59,13 @@ function parseConfigFile(
 }
 
 export class Indexing {
-  private sdbWriter: WriterType;
-  private fileIds = new Map<string, FileId>();
+  private fileIds = new Map<string, FileBuilder>();
   private program: ts.Program;
   private host: ts.CompilerHost;
   private diagnostics: readonly ts.Diagnostic[];
   public static verbose: boolean;
 
-  private constructor(
-    private databaseFilePath: string,
-    config: ts.ParsedCommandLine
-  ) {
+  private constructor(config: ts.ParsedCommandLine) {
     const { fileNames, options, projectReferences } = config;
     this.host = ts.createCompilerHost(options);
     const programOptions: ts.CreateProgramOptions = {
@@ -89,28 +77,20 @@ export class Indexing {
     };
     this.program = ts.createProgram(programOptions);
     this.diagnostics = ts.getPreEmitDiagnostics(this.program);
-    this.sdbWriter = new Writer();
   }
 
-  private getFileId(file: ts.SourceFile): FileId {
+  private getFile(writer: SourcetrailDB, file: ts.SourceFile): FileBuilder {
     let fileId = this.fileIds.get(file.fileName);
     if (fileId !== undefined) {
       return fileId;
     }
     // otherwise, we haven't indexed this file yet...
-    fileId = this.sdbWriter.recordFile(file.fileName);
-    if (fileId === 0) {
-      new Error(this.sdbWriter.getLastError());
-    }
-    const result = this.sdbWriter.recordFileLanguage(fileId, "typescript");
-    if (!result) {
-      new Error(this.sdbWriter.getLastError());
-    }
+    fileId = writer.createFile(file.fileName).asLanguage("typescript");
     this.fileIds.set(file.fileName, fileId);
     return fileId;
   }
 
-  private addDiagnostics() {
+  private addDiagnostics(writer: SourcetrailDB) {
     this.diagnostics.forEach(diagnostic => {
       const message = ts.flattenDiagnosticMessageText(
         diagnostic.messageText,
@@ -126,17 +106,13 @@ export class Indexing {
       const end = diagnostic.file.getLineAndCharacterOfPosition(
         diagnostic.start! + diagnostic.length!
       );
-      const sourceRange = new SourceRange(
-        this.getFileId(diagnostic.file),
+      const sourceRange = this.getFile(writer, diagnostic.file).at(
         start.line + 1,
         start.character + 1,
         end.line + 1,
         end.character + 1
       );
-      const result = this.sdbWriter.recordError(message, false, sourceRange);
-      if (!result) {
-        new Error(this.sdbWriter.getLastError());
-      }
+      writer.recordError(message, sourceRange);
     });
   }
 
@@ -246,88 +222,22 @@ export class Indexing {
     }
   }*/
 
-  private open(block: () => void) {
-    const result = this.sdbWriter.open(this.databaseFilePath);
-    if (!result) {
-      new Error(this.sdbWriter.getLastError());
-    }
-    try {
-      block();
-    } finally {
-      const result = this.sdbWriter.close();
-      if (!result) {
-        new Error(this.sdbWriter.getLastError());
-      }
-    }
-  }
-
-  private recordPackage(name: NameHierarchy) {
-    const symbolId = this.sdbWriter.recordSymbol(name);
-    if (symbolId === 0) {
-      new Error(this.sdbWriter.getLastError());
-    }
-    if (
-      !this.sdbWriter.recordSymbolDefinitionKind(
-        symbolId,
-        DefinitionKind.EXPLICIT
-      )
-    ) {
-      new Error(this.sdbWriter.getLastError());
-    }
-    if (!this.sdbWriter.recordSymbolKind(symbolId, SymbolKind.PACKAGE)) {
-      new Error(this.sdbWriter.getLastError());
-    }
-    return symbolId;
-  }
-
-  private recordModule(
-    name: NameHierarchy,
-    sf: ts.SourceFile,
-    sfFileId: FileId
-  ) {
-    const symbolId = this.sdbWriter.recordSymbol(name);
-    if (symbolId === 0) {
-      new Error(this.sdbWriter.getLastError());
-    }
-    if (
-      !this.sdbWriter.recordSymbolDefinitionKind(
-        symbolId,
-        DefinitionKind.EXPLICIT
-      )
-    ) {
-      new Error(this.sdbWriter.getLastError());
-    }
-    if (!this.sdbWriter.recordSymbolKind(symbolId, SymbolKind.MODULE)) {
-      new Error(this.sdbWriter.getLastError());
-    }
-    if (
-      !this.sdbWriter.recordSymbolScopeLocation(
-        symbolId,
-        this.nodeToSourceRange(sf, sfFileId)
-      )
-    ) {
-      new Error(this.sdbWriter.getLastError());
-    }
-    return symbolId;
-  }
-
-  private nodeToSourceRange(node: ts.Node, fileId: FileId) {
+  private nodeToSourceRange(node: ts.Node, file: FileBuilder) {
     const start = node
       .getSourceFile()
       .getLineAndCharacterOfPosition(node.getStart());
     const end = node
       .getSourceFile()
       .getLineAndCharacterOfPosition(node.getEnd());
-    return this.toSourceRange(fileId, start, end);
+    return this.toSourceRange(file, start, end);
   }
 
   private toSourceRange(
-    fileId: number,
+    file: FileBuilder,
     start: ts.LineAndCharacter,
     end: ts.LineAndCharacter
   ) {
-    return new SourceRange(
-      fileId,
+    return file.at(
       start.line + 1,
       start.character,
       end.line + 1,
@@ -338,101 +248,59 @@ export class Indexing {
   private libReferenceToSourceRange(
     ref: ts.FileReference,
     sf: ts.SourceFile,
-    fileId: FileId
+    file: FileBuilder
   ) {
     const start = sf.getLineAndCharacterOfPosition(ref.pos);
     const end = sf.getLineAndCharacterOfPosition(ref.end);
-    return this.toSourceRange(fileId, start, end);
+    return this.toSourceRange(file, start, end);
   }
 
-  private addCurrentFile(sf: ts.SourceFile) {
-    const fileId = this.getFileId(sf);
+  private addCurrentFile(writer: SourcetrailDB, sf: ts.SourceFile) {
+    const file = this.getFile(writer, sf);
     //const sfSymbolId = this.sourceFileToModuleSymbolId(sf, fileId);
     sf.libReferenceDirectives.forEach(ref => {
-      const refSourceFile = (this.program as any).getLibFileFromReference(ref);
-      const refFileId = this.getFileId(refSourceFile);
-      const refFileSymbolId = this.sourceFileToModuleSymbolId(
+      const refSourceFile: ts.SourceFile = (this
+        .program as any).getLibFileFromReference(ref);
+      const refFile = this.getFile(writer, refSourceFile);
+      const refFileSymbolId = this.sourceFileToModuleSymbol(
+        writer,
         refSourceFile,
-        fileId
+        file
       );
-      const refSymbolId = this.sdbWriter.recordSymbol(
-        new NameHierarchy("", [
-          new NameElement(`<reference lib="${ref.fileName}" />`)
-        ])
-      );
-      if (refSymbolId === 0) {
-        new Error(this.sdbWriter.getLastError());
-      }
-      let success = this.sdbWriter.recordSymbolDefinitionKind(
-        refSymbolId,
-        DefinitionKind.EXPLICIT
-      );
-      if (!success) {
-        new Error(this.sdbWriter.getLastError());
-      }
-      success = this.sdbWriter.recordSymbolKind(refSymbolId, SymbolKind.MACRO);
-      if (!success) {
-        new Error(this.sdbWriter.getLastError());
-      }
-      success = this.sdbWriter.recordSymbolLocation(
-        refSymbolId,
-        this.libReferenceToSourceRange(ref, sf, fileId)
-      );
-      if (!success) {
-        new Error(this.sdbWriter.getLastError());
-      }
-      const referenceId = this.sdbWriter.recordReference(
-        refSymbolId,
-        refFileSymbolId,
-        ReferenceKind.INCLUDE
-      );
-      if (referenceId === 0) {
-        new Error(this.sdbWriter.getLastError());
-      }
-      success = this.sdbWriter.recordReferenceLocation(
-        referenceId,
-        this.libReferenceToSourceRange(ref, sf, fileId)
-      );
-      if (!success) {
-        new Error(this.sdbWriter.getLastError());
-      }
+      const refSymbol = writer
+        .createSymbol(`<reference lib="${ref.fileName}" />`)
+        .explicitly()
+        .ofType(SymbolKind.MACRO)
+        .atLocation(this.libReferenceToSourceRange(ref, sf, file))
+        .isReferencedBy(refFileSymbolId, ReferenceKind.INCLUDE)
+        .atLocation(this.libReferenceToSourceRange(ref, sf, file));
     });
   }
 
-  private sourceFileToModuleSymbolId(sf: ts.SourceFile, sfFileId: FileId) {
+  private sourceFileToModuleSymbol(
+    writer: SourcetrailDB,
+    sf: ts.SourceFile,
+    sfFile: FileBuilder
+  ) {
     const filenameParts = path
       .relative(this.program.getCurrentDirectory(), sf.fileName)
       .split(path.sep);
-    const name = new NameHierarchy(
-      "/",
-      filenameParts.map(p => new NameElement(p))
-    );
-    const symbolId = this.recordModule(name, sf, sfFileId);
-    if (symbolId === 0) {
-      new Error(this.sdbWriter.getLastError());
-    }
+    const symbol = writer
+      .createSymbol("/", filenameParts)
+      .explicitly()
+      .ofType(SymbolKind.MODULE)
+      .withScope(this.nodeToSourceRange(sf, sfFile));
     for (let i = 0; i < filenameParts.length; i++) {
       if (filenameParts[i] === "node_modules") {
-        const packageSymbolId = this.recordPackage(
-          new NameHierarchy(
-            "/",
-            filenameParts.slice(i, i + 2).map(p => new NameElement(p))
-          )
-        );
-        if (packageSymbolId === 0) {
-          new Error(this.sdbWriter.getLastError());
-        }
-        const refId = this.sdbWriter.recordReference(
-          packageSymbolId,
-          symbolId,
-          ReferenceKind.INCLUDE
-        );
-        if (refId === 0) {
-          new Error(this.sdbWriter.getLastError());
-        }
+        writer
+          .createSymbol("/", filenameParts.slice(i, i + 2))
+          .explicitly()
+          .ofType(SymbolKind.PACKAGE)
+          .withScope(this.nodeToSourceRange(sf, sfFile))
+          .isReferencedBy(symbol, ReferenceKind.INCLUDE);
       }
     }
-    return symbolId;
+    return symbol;
   }
 
   static IndexFile(
@@ -507,36 +375,17 @@ export class Indexing {
     config: ts.ParsedCommandLine,
     clear: boolean
   ): void {
-    const indexer = new Indexing(databaseFilePath, config);
-    indexer.open(() => {
-      if (!indexer.sdbWriter.beginTransaction()) {
-        new Error(indexer.sdbWriter.getLastError());
-      }
-      if (clear) {
-        if (!indexer.sdbWriter.clear()) {
-          new Error(indexer.sdbWriter.getLastError());
-        }
-      }
-      if (!indexer.sdbWriter.commitTransaction()) {
-        new Error(indexer.sdbWriter.getLastError());
-      }
-      if (!indexer.sdbWriter.optimizeDatabaseMemory()) {
-        new Error(indexer.sdbWriter.getLastError());
-      }
-      if (!indexer.sdbWriter.beginTransaction()) {
-        new Error(indexer.sdbWriter.getLastError());
-      }
-      indexer.addDiagnostics();
-      indexer.program.getSourceFiles().forEach(sf => {
-        indexer.addCurrentFile(sf);
-        //indexer.visitTypeNodes(sf);
-      });
-      if (!indexer.sdbWriter.commitTransaction()) {
-        new Error(indexer.sdbWriter.getLastError());
-      }
-      if (!indexer.sdbWriter.optimizeDatabaseMemory()) {
-        new Error(indexer.sdbWriter.getLastError());
-      }
-    });
+    const indexer = new Indexing(config);
+    SourcetrailDB.open(
+      databaseFilePath,
+      writer => {
+        indexer.addDiagnostics(writer);
+        indexer.program.getSourceFiles().forEach(sf => {
+          indexer.addCurrentFile(writer, sf);
+          //indexer.visitTypeNodes(sf);
+        });
+      },
+      clear
+    );
   }
 }
