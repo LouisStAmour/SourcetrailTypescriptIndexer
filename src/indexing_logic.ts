@@ -6,7 +6,6 @@ import SourcetrailDB, {
 } from "sourcetraildb/dist/builder";
 
 import * as path from "path";
-import * as tspath from "./util/path";
 import { normalizePath, combinePaths } from "./util/path";
 
 // The following is only partially written and heavily inspired by https://github.com/Microsoft/TypeScript/wiki/Using-the-Compiler-API#a-minimal-compiler
@@ -58,6 +57,111 @@ function parseConfigFile(
   return result;
 }
 
+function toSourceRange(
+  file: FileBuilder,
+  start: ts.LineAndCharacter,
+  end: ts.LineAndCharacter
+) {
+  return file.at(
+    start.line + 1,
+    start.character,
+    end.line + 1,
+    end.character + 1
+  );
+}
+
+function nodeToSourceRange(node: ts.Node, file: FileBuilder) {
+  const start = node
+    .getSourceFile()
+    .getLineAndCharacterOfPosition(node.getStart());
+  const end = node.getSourceFile().getLineAndCharacterOfPosition(node.getEnd());
+  return toSourceRange(file, start, end);
+}
+
+function libReferenceToSourceRange(
+  ref: ts.FileReference,
+  sf: ts.SourceFile,
+  file: FileBuilder
+) {
+  const start = sf.getLineAndCharacterOfPosition(ref.pos);
+  const end = sf.getLineAndCharacterOfPosition(ref.end);
+  return toSourceRange(file, start, end);
+}
+
+function getLeadingCommentRangesOfNode(
+  node: ts.Node,
+  sourceFileOfNode: ts.SourceFile
+) {
+  return node.kind !== ts.SyntaxKind.JsxText
+    ? ts.getLeadingCommentRanges(sourceFileOfNode.text, node.pos)
+    : undefined;
+}
+
+const regionDelimiterRegExp = /^\s*\/\/\s*#(end)?region(?:\s+(.*))?(?:\r)?$/;
+function isRegionDelimiter(lineText: string) {
+  return regionDelimiterRegExp.exec(lineText);
+}
+
+function recordAtomicSourceRangesForMultilineComments(
+  writer: SourcetrailDB,
+  fileBuilder: FileBuilder,
+  sourceFile: ts.SourceFile,
+  n: ts.Node
+): void {
+  const comments = getLeadingCommentRangesOfNode(n, sourceFile);
+  if (!comments) return;
+  let firstSingleLineCommentStart = -1;
+  let lastSingleLineCommentEnd = -1;
+  let singleLineCommentCount = 0;
+  const sourceText = sourceFile.getFullText();
+  for (const { kind, pos, end } of comments) {
+    switch (kind) {
+      case ts.SyntaxKind.SingleLineCommentTrivia:
+        // never fold region delimiters into single-line comment regions
+        const commentText = sourceText.slice(pos, end);
+        if (isRegionDelimiter(commentText)) {
+          combineAndAddMultipleSingleLineComments();
+          singleLineCommentCount = 0;
+          break;
+        }
+
+        // For single line comments, combine consecutive ones (2 or more) into
+        // a single span from the start of the first till the end of the last
+        if (singleLineCommentCount === 0) {
+          firstSingleLineCommentStart = pos;
+        }
+        lastSingleLineCommentEnd = end;
+        singleLineCommentCount++;
+        break;
+      case ts.SyntaxKind.MultiLineCommentTrivia:
+        combineAndAddMultipleSingleLineComments();
+        const startLC = sourceFile.getLineAndCharacterOfPosition(pos);
+        const endLC = sourceFile.getLineAndCharacterOfPosition(end);
+        writer.recordAtomicSourceRange(
+          toSourceRange(fileBuilder, startLC, endLC)
+        );
+        singleLineCommentCount = 0;
+        break;
+    }
+  }
+  combineAndAddMultipleSingleLineComments();
+
+  function combineAndAddMultipleSingleLineComments(): void {
+    // Only outline spans of two or more consecutive single line comments
+    if (singleLineCommentCount > 1) {
+      const startLC = sourceFile.getLineAndCharacterOfPosition(
+        firstSingleLineCommentStart
+      );
+      const endLC = sourceFile.getLineAndCharacterOfPosition(
+        lastSingleLineCommentEnd
+      );
+      writer.recordAtomicSourceRange(
+        toSourceRange(fileBuilder, startLC, endLC)
+      );
+    }
+  }
+}
+
 export class Indexing {
   private fileIds = new Map<string, FileBuilder>();
   private program: ts.Program;
@@ -79,7 +183,10 @@ export class Indexing {
     this.diagnostics = ts.getPreEmitDiagnostics(this.program);
   }
 
-  private getFile(writer: SourcetrailDB, file: ts.SourceFile): FileBuilder {
+  private addOrGetFile(
+    writer: SourcetrailDB,
+    file: ts.SourceFile
+  ): FileBuilder {
     let fileId = this.fileIds.get(file.fileName);
     if (fileId !== undefined) {
       return fileId;
@@ -106,7 +213,7 @@ export class Indexing {
       const end = diagnostic.file.getLineAndCharacterOfPosition(
         diagnostic.start! + diagnostic.length!
       );
-      const sourceRange = this.getFile(writer, diagnostic.file).at(
+      const sourceRange = this.addOrGetFile(writer, diagnostic.file).at(
         start.line + 1,
         start.character + 1,
         end.line + 1,
@@ -118,162 +225,198 @@ export class Indexing {
 
   // TODO: Rename and rewrite these to traverse and map to Sourcetrail symbols, etc.
   // Use https://github.com/CoatiSoftware/SourcetrailPythonIndexer/blob/master/indexer.py as an example
-  private visitTypeNodes(node: ts.Node) {
-    /* if (node.parent) {
-      switch (node.parent.kind) {
-        case ts.SyntaxKind.IndexSignature:
-        case ts.SyntaxKind.MethodDeclaration:
-        case ts.SyntaxKind.MethodSignature:
-        case ts.SyntaxKind.Parameter:
-        case ts.SyntaxKind.PropertyDeclaration:
-        case ts.SyntaxKind.PropertySignature:
-        case ts.SyntaxKind.VariableDeclaration:
-          if (
-            (<
-              | ts.IndexSignatureDeclaration
-              | ts.MethodDeclaration
-              | ts.MethodSignature
-              | ts.ParameterDeclaration
-              | ts.PropertyDeclaration
-              | ts.PropertySignature
-              | ts.VariableDeclaration
-            >node.parent).type === node
-          ) {
-            this.processTypeOfNode(node);
-          }
-          break;
-        case ts.SyntaxKind.InterfaceDeclaration:
-          const heritageClauses = (<ts.InterfaceDeclaration>node.parent)
-            .heritageClauses;
-          if (heritageClauses) {
-            if (heritageClauses[0].token !== ts.SyntaxKind.ExtendsKeyword) {
-              throw new Error(
-                `Unexpected kind of heritage clause: ${
-                  ts.SyntaxKind[heritageClauses[0].kind]
-                }`
-              );
-            }
-            for (const type of heritageClauses[0].types) {
-              this.processTypeOfNode(type);
-            }
-          }
-          break;
-      }
-    }*/
-    if (node.kind === ts.SyntaxKind.Identifier && node.getText() === "Utils") {
-      debugger;
-    }
+  private visitTypeNodes(
+    writer: SourcetrailDB,
+    file: FileBuilder,
+    node: ts.Node
+  ): void {
+    recordAtomicSourceRangesForMultilineComments(
+      writer,
+      file,
+      node.getSourceFile(),
+      node
+    );
 
-    ts.forEachChild(node, n => this.visitTypeNodes(n));
-  }
-  /*
-  private processTypeOfNode(node: ts.Node): void {
-    if (node.kind === ts.SyntaxKind.UnionType) {
-      for (const t of (<ts.UnionTypeNode>node).types) {
-        this.processTypeOfNode(t);
-      }
-    } else {
-      const type = this.program.getTypeChecker().getTypeAtLocation(node);
-      if (type && !(type.flags & ts.TypeFlags.TypeParameter)) {
-        this.processType(type);
-      }
-    }
-  }
+    switch (node.kind) {
+      case ts.SyntaxKind.Constructor:
+        // Get parameter properties, and treat them as being on the *same* level as the constructor, not under it.
+        const ctr = <ts.ConstructorDeclaration>node;
+        //addNodeWithRecursiveChild(ctr, ctr.body);
 
-  private processType(type: ts.Type): void {
-    // if (this.visitedTypes.indexOf(type) >= 0) {
-    //   return;
-    // }
-    // this.visitedTypes.push(type);
-    const s = type.aliasSymbol || type.getSymbol();
-    if (!s) {
-      return;
-    }
-    if (s.name === "Array" || s.name === "ReadOnlyArray") {
-      // we should process type argument instead
-      return this.processType((<any>type).typeArguments[0]);
-    } else {
-      const declarations = s.getDeclarations();
-      if (declarations) {
-        for (const decl of declarations) {
-          const sourceFile = decl.getSourceFile();
-          if (
-            sourceFile.fileName === "this.protocolFile" ||
-            /lib(\..+)?\.d.ts/.test(path.basename(sourceFile.fileName))
-          ) {
-            return;
-          }
-          if (
-            decl.kind === ts.SyntaxKind.EnumDeclaration &&
-            !isStringEnum(decl as ts.EnumDeclaration)
-          ) {
-            // this.removedTypes.push(type);
-            return;
-          } else {
-            // splice declaration in final d.ts file
-            // const text = decl.getFullText();
-            // this.text += `${text}\n`;
-            // recursively pull all dependencies into result dts file
-
-            this.visitTypeNodes(decl);
+        // Parameter properties are children of the class, not the constructor.
+        for (const param of ctr.parameters) {
+          if (ts.isParameterPropertyDeclaration(param, ctr)) {
+            //addLeafNode(param);
           }
         }
-      }
+        break;
+
+      case ts.SyntaxKind.MethodDeclaration:
+      case ts.SyntaxKind.GetAccessor:
+      case ts.SyntaxKind.SetAccessor:
+      case ts.SyntaxKind.MethodSignature:
+        // if (!ts.hasDynamicName(<ts.ClassElement | ts.TypeElement>node)) {
+        //   addNodeWithRecursiveChild(
+        //     node,
+        //     (<ts.FunctionLikeDeclaration>node).body
+        //   );
+        // }
+        break;
+
+      case ts.SyntaxKind.PropertyDeclaration:
+      case ts.SyntaxKind.PropertySignature:
+        // if (!ts.hasDynamicName(<ts.ClassElement | ts.TypeElement>node)) {
+        //   addLeafNode(node);
+        // }
+        break;
+
+      case ts.SyntaxKind.ImportClause:
+        const importClause = <ts.ImportClause>node;
+        // Handle default import case e.g.:
+        //    import d from "mod";
+        if (importClause.name) {
+          // addLeafNode(importClause.name);
+        }
+
+        // Handle named bindings in imports e.g.:
+        //    import * as NS from "mod";
+        //    import {a, b as B} from "mod";
+        const { namedBindings } = importClause;
+        if (namedBindings) {
+          if (namedBindings.kind === ts.SyntaxKind.NamespaceImport) {
+            // addLeafNode(namedBindings);
+          } else {
+            for (const element of namedBindings.elements) {
+              // addLeafNode(element);
+            }
+          }
+        }
+        break;
+
+      case ts.SyntaxKind.ShorthandPropertyAssignment:
+        // addNodeWithRecursiveChild(
+        //   node,
+        //   (<ts.ShorthandPropertyAssignment>node).name
+        // );
+        break;
+      case ts.SyntaxKind.SpreadAssignment:
+        const { expression } = <ts.SpreadAssignment>node;
+        // Use the expression as the name of the SpreadAssignment, otherwise show as <unknown>.
+        // ts.isIdentifier(expression)
+        //   ? addLeafNode(node, expression)
+        //   : addLeafNode(node);
+        break;
+      case ts.SyntaxKind.BindingElement:
+      case ts.SyntaxKind.PropertyAssignment:
+      case ts.SyntaxKind.VariableDeclaration:
+        const { name, initializer } = node as
+          | ts.VariableDeclaration
+          | ts.PropertyAssignment
+          | ts.BindingElement;
+        // if (ts.isBindingPattern(name)) {
+        //   addChildrenRecursively(name);
+        // } else if (
+        //   initializer &&
+        //   ts.isFunctionOrClassExpression(initializer)
+        // ) {
+        //   // Add a node for the VariableDeclaration, but not for the initializer.
+        //   // startNode(node);
+        //   // forEachChild(initializer, addChildrenRecursively);
+        //   // endNode();
+        // } else {
+        //   // addNodeWithRecursiveChild(node, initializer);
+        // }
+        break;
+
+      case ts.SyntaxKind.FunctionDeclaration:
+        const nameNode = (<ts.FunctionLikeDeclaration>node).name;
+        // If we see a function declaration track as a possible ES5 class
+        if (nameNode && ts.isIdentifier(nameNode)) {
+          // addTrackedEs5Class(nameNode.text);
+        }
+        // addNodeWithRecursiveChild(
+        //   node,
+        //   (<ts.FunctionLikeDeclaration>node).body
+        // );
+        break;
+      case ts.SyntaxKind.ArrowFunction:
+      case ts.SyntaxKind.FunctionExpression:
+        /*addNodeWithRecursiveChild(
+              node,
+              (<ts.FunctionLikeDeclaration>node).body
+            );*/
+        break;
+
+      case ts.SyntaxKind.EnumDeclaration:
+        //startNode(node);
+        for (const member of (<ts.EnumDeclaration>node).members) {
+          /*if (!ts.isComputedProperty(member)) {
+                //addLeafNode(member);
+              }*/
+        }
+        //endNode();
+        break;
+
+      case ts.SyntaxKind.ClassDeclaration:
+      case ts.SyntaxKind.ClassExpression:
+      case ts.SyntaxKind.InterfaceDeclaration:
+        //startNode(node);
+        for (const member of (<ts.InterfaceDeclaration>node).members) {
+          //addChildrenRecursively(member);
+        }
+        //endNode();
+        break;
+
+      case ts.SyntaxKind.ModuleDeclaration:
+        // addNodeWithRecursiveChild(
+        //   node,
+        //   getInteriorModule(<ts.ModuleDeclaration>node).body
+        // );
+        break;
+
+      case ts.SyntaxKind.ExportSpecifier:
+      case ts.SyntaxKind.ImportEqualsDeclaration:
+      case ts.SyntaxKind.IndexSignature:
+      case ts.SyntaxKind.CallSignature:
+      case ts.SyntaxKind.ConstructSignature:
+      case ts.SyntaxKind.TypeAliasDeclaration:
+        //addLeafNode(node);
+        break;
+
+      case ts.SyntaxKind.CallExpression:
+      case ts.SyntaxKind.BinaryExpression:
+        {
+          // const special = ts.getAssignmentDeclarationKind(
+          //   node as ts.BinaryExpression
+          // );
+        }
+
+        ts.forEachChild(node, n => this.visitTypeNodes(writer, file, n));
     }
-  }*/
-
-  private nodeToSourceRange(node: ts.Node, file: FileBuilder) {
-    const start = node
-      .getSourceFile()
-      .getLineAndCharacterOfPosition(node.getStart());
-    const end = node
-      .getSourceFile()
-      .getLineAndCharacterOfPosition(node.getEnd());
-    return this.toSourceRange(file, start, end);
   }
 
-  private toSourceRange(
+  private processSourceFile(
+    writer: SourcetrailDB,
     file: FileBuilder,
-    start: ts.LineAndCharacter,
-    end: ts.LineAndCharacter
+    sf: ts.SourceFile
   ) {
-    return file.at(
-      start.line + 1,
-      start.character,
-      end.line + 1,
-      end.character + 1
-    );
-  }
-
-  private libReferenceToSourceRange(
-    ref: ts.FileReference,
-    sf: ts.SourceFile,
-    file: FileBuilder
-  ) {
-    const start = sf.getLineAndCharacterOfPosition(ref.pos);
-    const end = sf.getLineAndCharacterOfPosition(ref.end);
-    return this.toSourceRange(file, start, end);
-  }
-
-  private addCurrentFile(writer: SourcetrailDB, sf: ts.SourceFile) {
-    const file = this.getFile(writer, sf);
-    //const sfSymbolId = this.sourceFileToModuleSymbolId(sf, fileId);
     sf.libReferenceDirectives.forEach(ref => {
       const refSourceFile: ts.SourceFile = (this
         .program as any).getLibFileFromReference(ref);
-      const refFile = this.getFile(writer, refSourceFile);
-      const refFileSymbolId = this.sourceFileToModuleSymbol(
+      this.addOrGetFile(writer, refSourceFile);
+      const refFileSymbol = this.sourceFileToModuleSymbol(
         writer,
         refSourceFile,
         file
       );
-      const refSymbol = writer
+      writer
         .createSymbol(`<reference lib="${ref.fileName}" />`)
         .explicitly()
         .ofType(SymbolKind.MACRO)
-        .atLocation(this.libReferenceToSourceRange(ref, sf, file))
-        .isReferencedBy(refFileSymbolId, ReferenceKind.INCLUDE)
-        .atLocation(this.libReferenceToSourceRange(ref, sf, file));
+        .atLocation(libReferenceToSourceRange(ref, sf, file))
+        .isReferencedBy(refFileSymbol, ReferenceKind.INCLUDE)
+        .atLocation(libReferenceToSourceRange(ref, sf, file));
+      // TODO: Use @internal pragmas or comment parsing to assign location start/end
     });
   }
 
@@ -289,14 +432,14 @@ export class Indexing {
       .createSymbol("/", filenameParts)
       .explicitly()
       .ofType(SymbolKind.MODULE)
-      .withScope(this.nodeToSourceRange(sf, sfFile));
+      .withScope(nodeToSourceRange(sf, sfFile));
     for (let i = 0; i < filenameParts.length; i++) {
       if (filenameParts[i] === "node_modules") {
         writer
           .createSymbol("/", filenameParts.slice(i, i + 2))
           .explicitly()
           .ofType(SymbolKind.PACKAGE)
-          .withScope(this.nodeToSourceRange(sf, sfFile))
+          .withScope(nodeToSourceRange(sf, sfFile))
           .isReferencedBy(symbol, ReferenceKind.INCLUDE);
       }
     }
@@ -381,8 +524,9 @@ export class Indexing {
       writer => {
         indexer.addDiagnostics(writer);
         indexer.program.getSourceFiles().forEach(sf => {
-          indexer.addCurrentFile(writer, sf);
-          //indexer.visitTypeNodes(sf);
+          const file = indexer.addOrGetFile(writer, sf);
+          indexer.processSourceFile(writer, file, sf);
+          indexer.visitTypeNodes(writer, file, sf);
         });
       },
       clear
