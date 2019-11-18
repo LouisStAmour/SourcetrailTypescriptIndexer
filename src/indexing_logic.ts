@@ -64,9 +64,9 @@ function toSourceRange(
 ) {
   return file.at(
     start.line + 1,
-    start.character,
+    start.character + 1,
     end.line + 1,
-    end.character + 1
+    end.character
   );
 }
 
@@ -230,22 +230,20 @@ export class Indexing {
     file: FileBuilder,
     node: ts.Node
   ): void {
-    recordAtomicSourceRangesForMultilineComments(
-      writer,
-      file,
-      node.getSourceFile(),
-      node
-    );
+    const sf = node.getSourceFile();
+    recordAtomicSourceRangesForMultilineComments(writer, file, sf, node);
 
     switch (node.kind) {
       case ts.SyntaxKind.Constructor:
         // Get parameter properties, and treat them as being on the *same* level as the constructor, not under it.
         const ctr = <ts.ConstructorDeclaration>node;
+        //temp:debugger;
         //addNodeWithRecursiveChild(ctr, ctr.body);
 
         // Parameter properties are children of the class, not the constructor.
         for (const param of ctr.parameters) {
           if (ts.isParameterPropertyDeclaration(param, ctr)) {
+            //temp:debugger;
             //addLeafNode(param);
           }
         }
@@ -255,6 +253,25 @@ export class Indexing {
       case ts.SyntaxKind.GetAccessor:
       case ts.SyntaxKind.SetAccessor:
       case ts.SyntaxKind.MethodSignature:
+        const n = node as
+          | ts.MethodDeclaration
+          | ts.GetAccessorDeclaration
+          | ts.SetAccessorDeclaration
+          | ts.MethodSignature;
+        const names: string[] = [];
+        for (
+          let s: ts.Symbol = (n as any).symbol;
+          s !== undefined;
+          s = (s as any).parent as ts.Symbol
+        ) {
+          names.unshift(s.name);
+        }
+        writer
+          .createSymbol(".", names)
+          .explicitly()
+          .ofType(SymbolKind.FIELD)
+          .atLocation(nodeToSourceRange(n.name, file))
+          .withSignature(nodeToSourceRange(n, file));
         // if (!ts.hasDynamicName(<ts.ClassElement | ts.TypeElement>node)) {
         //   addNodeWithRecursiveChild(
         //     node,
@@ -265,6 +282,7 @@ export class Indexing {
 
       case ts.SyntaxKind.PropertyDeclaration:
       case ts.SyntaxKind.PropertySignature:
+        //temp:debugger;
         // if (!ts.hasDynamicName(<ts.ClassElement | ts.TypeElement>node)) {
         //   addLeafNode(node);
         // }
@@ -275,6 +293,7 @@ export class Indexing {
         // Handle default import case e.g.:
         //    import d from "mod";
         if (importClause.name) {
+          //temp:debugger;
           // addLeafNode(importClause.name);
         }
 
@@ -284,9 +303,11 @@ export class Indexing {
         const { namedBindings } = importClause;
         if (namedBindings) {
           if (namedBindings.kind === ts.SyntaxKind.NamespaceImport) {
+            //temp:debugger;
             // addLeafNode(namedBindings);
           } else {
             for (const element of namedBindings.elements) {
+              //temp:debugger;
               // addLeafNode(element);
             }
           }
@@ -294,6 +315,7 @@ export class Indexing {
         break;
 
       case ts.SyntaxKind.ShorthandPropertyAssignment:
+        //temp:debugger;
         // addNodeWithRecursiveChild(
         //   node,
         //   (<ts.ShorthandPropertyAssignment>node).name
@@ -301,6 +323,7 @@ export class Indexing {
         break;
       case ts.SyntaxKind.SpreadAssignment:
         const { expression } = <ts.SpreadAssignment>node;
+        //temp:debugger;
         // Use the expression as the name of the SpreadAssignment, otherwise show as <unknown>.
         // ts.isIdentifier(expression)
         //   ? addLeafNode(node, expression)
@@ -326,13 +349,37 @@ export class Indexing {
         // } else {
         //   // addNodeWithRecursiveChild(node, initializer);
         // }
+        if (node.flags & (1 << 23)) {
+          // 1 << 23 internally documented as "ambient" or global.
+          writer
+            .createSymbol(".", name.getText(sf))
+            .explicitly()
+            .ofType(SymbolKind.GLOBAL_VARIABLE)
+            .atLocation(nodeToSourceRange(name, file))
+            .withSignature(nodeToSourceRange(node.parent, file));
+        } else {
+          //temp:debugger;
+        }
         break;
 
       case ts.SyntaxKind.FunctionDeclaration:
         const nameNode = (<ts.FunctionLikeDeclaration>node).name;
         // If we see a function declaration track as a possible ES5 class
         if (nameNode && ts.isIdentifier(nameNode)) {
+          if (node.flags & (1 << 23)) {
+            // 1 << 23 internally documented as "ambient" or global.
+            writer
+              .createSymbol(".", nameNode.getText(sf))
+              .explicitly()
+              .ofType(SymbolKind.GLOBAL_VARIABLE)
+              .atLocation(nodeToSourceRange(nameNode, file))
+              .withSignature(nodeToSourceRange(node.parent, file));
+          } else {
+            //temp:debugger;
+          }
           // addTrackedEs5Class(nameNode.text);
+        } else {
+          //temp:debugger;
         }
         // addNodeWithRecursiveChild(
         //   node,
@@ -341,6 +388,7 @@ export class Indexing {
         break;
       case ts.SyntaxKind.ArrowFunction:
       case ts.SyntaxKind.FunctionExpression:
+        //temp:debugger;
         /*addNodeWithRecursiveChild(
               node,
               (<ts.FunctionLikeDeclaration>node).body
@@ -350,6 +398,7 @@ export class Indexing {
       case ts.SyntaxKind.EnumDeclaration:
         //startNode(node);
         for (const member of (<ts.EnumDeclaration>node).members) {
+          //temp:debugger;
           /*if (!ts.isComputedProperty(member)) {
                 //addLeafNode(member);
               }*/
@@ -358,16 +407,38 @@ export class Indexing {
         break;
 
       case ts.SyntaxKind.ClassDeclaration:
-      case ts.SyntaxKind.ClassExpression:
       case ts.SyntaxKind.InterfaceDeclaration:
         //startNode(node);
-        for (const member of (<ts.InterfaceDeclaration>node).members) {
-          //addChildrenRecursively(member);
+        let symbol;
+        if (node.flags & (1 << 23)) {
+          // 1 << 23 internally documented as "ambient" or global.
+          const name = (<ts.InterfaceDeclaration | ts.ClassDeclaration>node)
+            .name;
+          symbol = writer
+            .createSymbol(".", name.getText(sf))
+            .explicitly()
+            .ofType(SymbolKind.GLOBAL_VARIABLE)
+            .atLocation(nodeToSourceRange(name, file));
+        } else {
+          //temp:debugger;
         }
+        // for (const member of (<ts.InterfaceDeclaration>node).members) {
+        //   //addChildrenRecursively(member);
+        //   symbol
+        //     .createChildSymbol(member.name.getText(sf))
+        //     .explicitly()
+        //     .ofType(SymbolKind.FIELD)
+        //     .atLocation(nodeToSourceRange(member.name, file))
+        //     .withSignature(nodeToSourceRange(member, file));
+        // }
         //endNode();
+        break;
+      case ts.SyntaxKind.ClassExpression:
+        //temp:debugger;
         break;
 
       case ts.SyntaxKind.ModuleDeclaration:
+        //temp:debugger;
         // addNodeWithRecursiveChild(
         //   node,
         //   getInteriorModule(<ts.ModuleDeclaration>node).body
@@ -379,20 +450,40 @@ export class Indexing {
       case ts.SyntaxKind.IndexSignature:
       case ts.SyntaxKind.CallSignature:
       case ts.SyntaxKind.ConstructSignature:
+        //temp:debugger;
+        //addLeafNode(node);
+        break;
+
       case ts.SyntaxKind.TypeAliasDeclaration:
+        const typeAlias = node as ts.TypeAliasDeclaration;
+        if (typeAlias.flags & (1 << 23)) {
+          const typeName = writer
+            .createSymbol(".", typeAlias.name.getText(sf))
+            .explicitly()
+            .ofType(SymbolKind.GLOBAL_VARIABLE)
+            .atLocation(nodeToSourceRange(typeAlias.name, file))
+            .withSignature(nodeToSourceRange(typeAlias, file));
+          writer
+            .createSymbol(".", typeAlias.type.getText(sf))
+            .explicitly()
+            .ofType(SymbolKind.TYPEDEF)
+            .atLocation(nodeToSourceRange(typeAlias.type, file))
+            .isReferencedBy(typeName, ReferenceKind.USAGE);
+        } else {
+          //temp:debugger;
+        }
         //addLeafNode(node);
         break;
 
       case ts.SyntaxKind.CallExpression:
       case ts.SyntaxKind.BinaryExpression:
-        {
-          // const special = ts.getAssignmentDeclarationKind(
-          //   node as ts.BinaryExpression
-          // );
-        }
-
-        ts.forEachChild(node, n => this.visitTypeNodes(writer, file, n));
+        //temp:debugger;
+        // const special = ts.getAssignmentDeclarationKind(
+        //   node as ts.BinaryExpression
+        // );
+        break;
     }
+    ts.forEachChild(node, n => this.visitTypeNodes(writer, file, n));
   }
 
   private processSourceFile(

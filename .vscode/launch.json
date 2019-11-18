@@ -4,23 +4,24 @@
   // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
   "version": "0.2.0",
   "configurations": [
-
     {
       "type": "node",
       "request": "launch",
       "name": "Launch Program",
       "args": [
-        "${workspaceFolder}/src/index.ts",
+        "C:/Users/louis/Code/SourcetrailTypescriptIndexer/src/index.ts",
         "--verbose",
         "project",
         "--project-path",
-        "C:/Users/louis/Code/todomvc/examples/typescript-react/js/",
+        "C:/Users/louis/Code/todomvc/examples/typescript-angular/",
         "--clear"
       ],
       "runtimeArgs": ["-r", "ts-node/register"],
       "sourceMaps": true,
       "protocol": "inspector",
-      "env": { "TS_NODE_PROJECT": "${workspaceFolder}/tsconfig.json" }
+      "env": {
+        "TS_NODE_PROJECT": "C:/Users/louis/Code/SourcetrailTypescriptIndexer/tsconfig.json"
+      }
     }
   ]
 }
